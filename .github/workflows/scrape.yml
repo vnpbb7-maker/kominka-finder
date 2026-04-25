@@ -18,7 +18,7 @@ on:
 jobs:
   scrape:
     name: Scrape & Score Listings
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
 
     env:
@@ -49,7 +49,9 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('scraper/requirements.txt') }}
 
       - name: Install Playwright Chromium
-        run: playwright install chromium --with-deps
+        run: |
+          playwright install chromium
+          playwright install-deps chromium
 
       - name: Run scraper
         working-directory: scraper
@@ -70,7 +72,7 @@ jobs:
   notify-on-failure:
     name: Notify on scrape failure
     needs: scrape
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: failure()
 
     steps:
