@@ -10,6 +10,7 @@ on:
                                         skip_scoring:
                                                 type: boolean
                                                         default: false
+
                                                         jobs:
                                                           scrape:
                                                               runs-on: ubuntu-latest
@@ -23,24 +24,11 @@ on:
                                                                                                             with:
                                                                                                                       python-version: "3.12"
                                                                                                                                 cache: "pip"
-                                                                                                                                          cache-dependency-path: scraper/requirements.txt
-                                                                                                                                                - run: pip install -r scraper/requirements.txt
-                                                                                                                                                      - name: Cache Playwright
-                                                                                                                                                              uses: actions/cache@v4
-                                                                                                                                                                      with:
-                                                                                                                                                                                path: ~/.cache/ms-playwright
-                                                                                                                                                                                          key: playwright-${{ runner.os }}-${{ hashFiles('scraper/requirements.txt') }}
-                                                                                                                                                                                                - run: playwright install chromium --with-deps
-                                                                                                                                                                                                      - working-directory: scraper
-                                                                                                                                                                                                              run: python run_scraper.py
-                                                                                                                                                                                                                      env:
-                                                                                                                                                                                                                                MAX_PAGES: ${{ github.event.inputs.max_pages || '10' }}
-                                                                                                                                                                                                                                          SKIP_SCORING: ${{ github.event.inputs.skip_scoring || 'false' }}
-                                                                                                                                                                                                                                          
-                                                                                                                                                                                                                                            notify-on-failure:
-                                                                                                                                                                                                                                                runs-on: ubuntu-latest
-                                                                                                                                                                                                                                                    if: failure()
-                                                                                                                                                                                                                                                        needs: scrape
-                                                                                                                                                                                                                                                            steps:
-                                                                                                                                                                                                                                                                  - run: echo "Failed"
-                                                                                                                                                                                                                                                                  
+                                                                                                                                      - name: Install dependencies
+                                                                                                                                              run: |
+                                                                                                                                                        python -m pip install --upgrade pip
+                                                                                                                                                                  pip install -r requirements.txt
+                                                                                                                                                                        - name: Run scraper
+                                                                                                                                                                                run: |
+                                                                                                                                                                                          python scrape_to_supabase.py --max-pages ${{ github.event.inputs.max_pages || 10 }} ${{ github.event.inputs.skip_scoring == 'true' && '--skip-scoring' || '' }}
+                                                                                                                                                                                          
