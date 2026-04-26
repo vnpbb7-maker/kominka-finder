@@ -8,11 +8,12 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
+from pathlib import Path
 from dotenv import load_dotenv
 from loguru import logger
 from supabase import create_client, Client
 
-load_dotenv()
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
