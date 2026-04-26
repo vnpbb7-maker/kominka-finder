@@ -149,7 +149,12 @@ class BaseScraper(ABC):
             return self._httpx_fetch(url)
 
     def _playwright_fetch(self, url: str) -> str:
-        """Use Playwright headless browser to render JS and return page HTML."""
+        """Use Playwright headless browser to render JS and return page HTML.
+
+        Uses 'domcontentloaded' (not 'networkidle') for speed.
+        kominka.net is WordPress server-side HTML — no JS rendering needed.
+        Falls back to httpx on timeout.
+        """
         if not self._playwright:
             self._playwright = sync_playwright().start()
             self._browser = self._playwright.chromium.launch(
@@ -165,9 +170,14 @@ class BaseScraper(ABC):
             )
         )
         try:
-            page.goto(url, wait_until="networkidle", timeout=30_000)
+            # domcontentloaded is much faster than networkidle
+            # (doesn't wait for all images/analytics to finish loading)
+            page.goto(url, wait_until="domcontentloaded", timeout=20_000)
             html = page.content()
             return html
+        except Exception as e:
+            logger.warning(f"Playwright timeout on {url}, retrying with httpx: {e}")
+            return self._httpx_fetch(url)
         finally:
             page.close()
 
