@@ -187,22 +187,24 @@ class KominkaNetScraper(BaseScraper):
     # ── Private helpers ───────────────────────────────────────
 
     def _extract_title(self, soup: BeautifulSoup) -> Optional[str]:
-        # kominka.net WordPress — h1.entry-title is the post title
+        # kominka.net: <title>物件名 – 古民家住まいる</title> is the clean title
+        # H1 has a noisy prefix like '206013 [東北] 物件名' so we prefer <title>
+        t = soup.find("title")
+        if t:
+            text = re.sub(r"\s*[\u2013\-|\uff5c]\s*古民家住まいる.*$", "", t.get_text()).strip()
+            if text:
+                return text
+
+        # Fallback: strip prefix from h1
         for sel in ["h1.entry-title", ".entry-title", "h1"]:
             el = soup.select_one(sel)
             if el:
                 text = el.get_text(strip=True)
-                # Strip leading item-number prefix like "204009[宮城県]"
-                text = re.sub(r"^\d+\[[^\]]+\]\s*", "", text).strip()
+                # Strip leading '206013 [東北] ' style prefix
+                text = re.sub(r"^\d+[^\u3041-\u30ff\u4e00-\u9fff]*", "", text).strip()
+                text = re.sub(r"^\[[^\]]+\]\s*", "", text).strip()
                 if text and "古民家住まいる" not in text:
                     return text
-
-        # Fallback: parse <title> tag
-        t = soup.find("title")
-        if t:
-            text = re.sub(r"\s*[–\-|｜]\s*古民家住まいる.*$", "", t.get_text()).strip()
-            if text:
-                return text
         return None
 
     def _extract_price(self, soup: BeautifulSoup) -> Optional[int]:
@@ -229,35 +231,66 @@ class KominkaNetScraper(BaseScraper):
                 pass
         return None
 
+    # Slug → 都道府県名 マッピング（WordPress カテゴリスラッグ）
+    SLUG_TO_PREF: dict[str, str] = {
+        "hokkaido": "北海道",
+        "aomori": "青森県", "iwate": "岩手県", "miyagi": "宮城県",
+        "akita": "秋田県", "yamagata": "山形県", "fukushima": "福島県",
+        "ibaraki": "茨城県", "tochigi": "栃木県", "gunma": "群馬県",
+        "saitama": "埼玉県", "chiba": "千葉県", "tokyo": "東京都",
+        "kanagawa": "神奈川県",
+        "niigata": "新潟県", "toyama": "富山県", "ishikawa": "石川県",
+        "hukui": "福井県", "fukui": "福井県",
+        "yamanashi": "山梨県", "nagano": "長野県", "shizuoka": "静岡県",
+        "aichi": "愛知県", "mie": "三重県", "gifu": "岐阜県",
+        "shiga": "滋賀県", "kyoto": "京都府", "osaka": "大阪府",
+        "hyogo": "兵庫県", "nara": "奈良県", "wakayama": "和歌山県",
+        "tottori": "鳥取県", "shimane": "島根県", "okayama": "岡山県",
+        "hiroshima": "広島県", "yamaguchi": "山口県",
+        "tokushima": "徳島県", "kagawa": "香川県", "ehime": "愛媛県",
+        "kochi": "高知県",
+        "fukuoka": "福岡県", "saga": "佐賀県", "nagasaki": "長崎県",
+        "kumamoto": "熊本県", "oita": "大分県", "miyazaki": "宮崎県",
+        "kagoshima": "鹿児島県", "okinawa": "沖縄県",
+    }
+
     def _extract_location(self, soup: BeautifulSoup) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        """Return (prefecture, city, address)."""
+        """Return (prefecture, city, address).
+
+        Primary: WordPress post class contains 'category-{slug}' (e.g. category-yamagata)
+        Fallback: parse breadcrumb / entry text for Japanese address patterns.
+        """
         pref = city = addr = None
 
-        # 1. post-category class (kominka.net card label)
-        for sel in [".post-category", ".breadcrumb", "#breadcrumbs", "nav.breadcrumbs"]:
-            el = soup.select_one(sel)
-            if el:
-                text = el.get_text()
-                p, c, a = self._parse_japanese_address(text)
+        # 1. Parse WordPress category CSS classes on the post container
+        #    e.g. class="... category-sale category-yamagata category-touhoku ..."
+        post_el = soup.select_one("[class*='category-']")
+        if post_el:
+            classes = post_el.get("class", [])
+            for cls in classes:
+                if cls.startswith("category-"):
+                    slug = cls.replace("category-", "")
+                    if slug in self.SLUG_TO_PREF:
+                        pref = self.SLUG_TO_PREF[slug]
+                        break
+
+        # 2. Breadcrumb text fallback
+        if not pref:
+            for sel in [".breadcrumb", "#breadcrumbs", "nav.breadcrumbs"]:
+                el = soup.select_one(sel)
+                if el:
+                    p, c, a = self._parse_japanese_address(el.get_text())
+                    if p:
+                        pref, city, addr = p, c, a
+                        break
+
+        # 3. Entry content text fallback
+        if not pref:
+            entry = soup.select_one(".entry-content, .panel-body, article")
+            if entry:
+                p, c, a = self._parse_japanese_address(entry.get_text())
                 if p:
-                    return p, c, a
-
-        # 2. WordPress category links contain prefecture name
-        for a in soup.select("a[href*='/category/bukken/']"):
-            text = a.get_text(strip=True)
-            p, c, _ = self._parse_japanese_address(text + "県")  # hint
-            if not p:
-                p, c, _ = self._parse_japanese_address(text)
-            if p:
-                pref = p
-                break
-
-        # 3. Entry content text
-        entry = soup.select_one(".entry-content, .panel-body, article")
-        if entry:
-            p, c, a = self._parse_japanese_address(entry.get_text())
-            if p and not pref:
-                pref, city, addr = p, c, a
+                    pref, city, addr = p, c, a
 
         return pref, city, addr
 
