@@ -17,6 +17,7 @@ from bs4 import BeautifulSoup
 from loguru import logger
 
 from scraper_base import BaseScraper
+import db as _db
 
 # ── Constants ─────────────────────────────────────────────────
 
@@ -137,22 +138,66 @@ class KominkaNetScraper(BaseScraper):
 
         return None
 
+    # ── Sold-out keywords (text anywhere on the page) ─────────
+    # kominka.net uses these phrases for sold/withdrawn listings.
+    SOLD_KEYWORDS: list[str] = [
+        # Explicit sold/closed notices
+        "大切にしていただける方を見つかりました",
+        "大切にしていただける方が見つかりました",
+        "成約済",
+        "ご成約",
+        "売却済",
+        "売れました",
+        "売却しました",
+        "掲載終了",
+        "募集終了",
+        "受付終了",
+        "公開終了",
+        "商談中",       # under negotiation → treat as unavailable
+        "SOLD OUT",
+        "Sold Out",
+        "sold out",
+    ]
+
     # ── Step 2: Parse a detail page ───────────────────────────
 
     def parse_listing_page(self, url: str, html: str) -> Optional[dict]:
+        """Parse a kominka.net detail page.
+
+        Returns None (and marks the DB row inactive) if the listing is sold.
+        """
         soup = BeautifulSoup(html, "lxml")
 
         logger.debug(f"[kominka.net] Parsing detail page: {url}")
         logger.debug(f"[kominka.net] Detail HTML preview:\n{html[:1000]}")
 
-        # Skip sold listings
-        sold_kw = ["成約済", "売却済", "掲載終了", "募集終了", "SOLD OUT", "商談中"]
+        # ── 1. Text-based sold detection ────────────────────
         page_text = soup.get_text()
-        for kw in sold_kw:
+        for kw in self.SOLD_KEYWORDS:
             if kw in page_text:
-                logger.info(f"[kominka.net] Skipping sold listing ({kw}): {url}")
+                logger.info(f"[kominka.net] SOLD OUT ({kw}): {url}")
+                self._mark_sold(url)
                 return None
 
+        # ── 2. Image alt-text sold detection ─────────────────
+        # kominka.net overlays the text on the card thumbnail *and* as alt
+        sold_alt_patterns = [
+            "大切にしていただける方",
+            "成約",
+            "売却済",
+            "sold",
+            "SOLD",
+        ]
+        for img in soup.select("img"):
+            alt = (img.get("alt") or "").lower()
+            src = (img.get("src") or "").lower()
+            for pat in sold_alt_patterns:
+                if pat.lower() in alt or pat.lower() in src:
+                    logger.info(f"[kominka.net] SOLD OUT (image: {pat!r}): {url}")
+                    self._mark_sold(url)
+                    return None
+
+        # ── Build listing dict ────────────────────────────────
         listing: dict = {}
 
         listing["title"] = self._extract_title(soup)
@@ -168,21 +213,31 @@ class KominkaNetScraper(BaseScraper):
         listing["location_address"] = addr
 
         details = self._extract_detail_table(soup)
-        listing["area_sqm"] = details.get("building_area")
+        listing["area_sqm"]      = details.get("building_area")
         listing["land_area_sqm"] = details.get("land_area")
-        listing["year_built"] = details.get("year_built")
-        listing["agency_name"] = details.get("agency_name")
+        listing["year_built"]    = details.get("year_built")
+        listing["agency_name"]   = details.get("agency_name")
         listing["contact_phone"] = details.get("contact_phone")
         listing["contact_email"] = details.get("contact_email")
 
         listing["description"] = self._extract_description(soup)
-        listing["images"] = self._extract_images(soup)
+        listing["images"]      = self._extract_images(soup)
 
         logger.info(
             f"[kominka.net] Parsed: {listing['title']!r} | "
             f"{listing['location_prefecture']} | {listing['price']}万円"
         )
         return listing
+
+    def _mark_sold(self, url: str) -> None:
+        """Set is_active=False in the DB for a sold listing. No-op if not yet in DB."""
+        try:
+            client = _db.get_client()
+            updated = _db.mark_inactive(client, url)
+            if not updated:
+                logger.debug(f"[kominka.net] Sold listing not yet in DB (ok to skip): {url}")
+        except Exception as e:
+            logger.warning(f"[kominka.net] Could not mark inactive in DB: {e}")
 
     # ── Private helpers ───────────────────────────────────────
 

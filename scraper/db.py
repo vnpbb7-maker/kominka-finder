@@ -83,6 +83,24 @@ def update_scores(client: Client, listing_id: str, scores: dict) -> None:
     client.table("listings").update(scores).eq("id", listing_id).execute()
 
 
+def mark_inactive(client: Client, source_url: str) -> bool:
+    """Set is_active=False for a listing identified by its source_url.
+
+    Used for sold/withdrawn listings — preserves the row for history.
+    Returns True if the row existed and was updated, False if not found.
+    """
+    result = (
+        client.table("listings")
+        .update({"is_active": False, "updated_at": datetime.now(timezone.utc).isoformat()})
+        .eq("source_url", source_url)
+        .execute()
+    )
+    updated = bool(result.data)
+    if updated:
+        logger.debug(f"Marked inactive: {source_url}")
+    return updated
+
+
 def get_existing_urls(client: Client, source_site: str) -> set[str]:
     """Fetch all known source_urls for a given site to skip duplicates fast."""
     result = (
