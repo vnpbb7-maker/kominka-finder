@@ -1,6 +1,21 @@
 """
 run_scraper.py — Entry point for the GitHub Actions scrape job.
 Orchestrates: scrape → geocode → score → upsert to Supabase.
+
+Active scrapers:
+  - kominka.net   (全国古民家専門サイト)
+  - smout.jp      (地方移住・古民家・空き家)
+
+Inactive / DNS-dead sites (checked 2026-04):
+  - shizuoka-akiya.net  → DNS failure
+  - akiya.pref.shizuoka.jp → DNS failure
+  - chiba-iju.jp         → DNS failure
+  - yamanashi-iju.jp     → DNS failure
+  - fujiyoshida-akiya.jp → DNS failure
+  - fujinomiya-akiya.jp  → DNS failure
+  - tateyama-akiyabank.jp → DNS failure
+  - akiya.maruchiba.jp   → DNS failure
+  - akiya-athome.jp      → JS-only, no static listing index
 """
 
 import os
@@ -12,8 +27,9 @@ from db import start_scrape_log, finish_scrape_log
 from geocoder import geocode_listing
 from scorer import score_batch
 from scraper_kominka_net import KominkaNetScraper
+from scraper_smout import SmoutScraper
 
-# ── Logging setup ─────────────────────────────────────────────
+# ── Logging setup ──────────────────────────────────────────────────────────────
 logger.remove()
 logger.add(
     sys.stderr,
@@ -79,11 +95,11 @@ def main():
 
     db = get_client()
 
-    # ── List of scrapers to run (add more in Phase 4) ──
+    # ── Active scrapers ────────────────────────────────────────
+    # Add new scrapers here as more sites become available.
     scrapers_to_run = [
-        KominkaNetScraper,
-        # AkiyaAthomeScraper,    # Phase 4
-        # MunicipalBankScraper,  # Phase 4
+        KominkaNetScraper,   # kominka.net  — 全国古民家専門
+        SmoutScraper,        # smout.jp     — 地方移住・古民家・空き家
     ]
 
     total_found = total_new = total_updated = total_errors = 0
@@ -92,10 +108,10 @@ def main():
         log_id = start_scrape_log(db, scraper_class.SOURCE_SITE)
         try:
             found, new, updated, errors = run_scraper(scraper_class, db)
-            total_found += found
-            total_new += new
+            total_found   += found
+            total_new     += new
             total_updated += updated
-            total_errors += errors
+            total_errors  += errors
 
             finish_scrape_log(
                 db, log_id,
@@ -115,7 +131,7 @@ def main():
             )
             total_errors += 1
 
-    # ── Run AI scoring on newly-inserted listings ──
+    # ── Run AI scoring on newly-inserted listings ──────────────
     if "GEMINI_API_KEY" in os.environ:
         scored_count = run_scoring(db)
         logger.info(f"AI scoring complete: {scored_count} listings scored")
@@ -129,7 +145,7 @@ def main():
     )
 
     # Exit non-zero if too many errors (will mark GitHub Actions job as failed)
-    if total_errors > total_found * 0.5:  # >50% error rate
+    if total_errors > total_found * 0.5:   # >50% error rate
         sys.exit(1)
 
 
