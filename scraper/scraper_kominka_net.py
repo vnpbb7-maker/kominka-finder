@@ -1,13 +1,12 @@
 """
-scraper_kominka_net.py — Scraper for https://www.kominka.net
+scraper_kominka_net.py — Scraper for https://kominka.net
 Japan's largest kominka-specialist listing site.
 
 Target pages:
-  - Index: https://www.kominka.net/list/ (paginated search results)
-  - Detail: https://www.kominka.net/item/{id}/
+  - Top page / index: https://kominka.net/  (paginated: /page/2/, /page/3/ …)
+  - Detail: https://kominka.net/bukken/{id}/
 
-Selectors verified against site structure as of 2025-04.
-If selectors break, check the CSS classes on the live site.
+Selectors verified against live site as of 2026-04.
 """
 
 import re
@@ -22,12 +21,11 @@ from scraper_base import BaseScraper
 # ── Constants ─────────────────────────────────────────────────
 
 SOURCE_SITE = "kominka.net"
-BASE_URL = "https://www.kominka.net"
+BASE_URL = "https://kominka.net"
 
-# Start from all-Japan listing sorted by newest
-LIST_URL = f"{BASE_URL}/list/?sort=new"
+# Top page lists all recent kominka (paginated)
+LIST_URL = f"{BASE_URL}/"
 
-# Max pages to scrape per run (safety cap; ~20 listings/page = 200 listings/run)
 MAX_PAGES = 10
 
 
@@ -39,13 +37,14 @@ class KominkaNetScraper(BaseScraper):
 
     SOURCE_SITE = SOURCE_SITE
     BASE_URL = BASE_URL
-    REQUEST_DELAY = 5.0  # 5 seconds between requests
+    REQUEST_DELAY = 5.0  # 5 seconds between requests (be polite)
 
     # ── Step 1: Discover listing URLs ─────────────────────────
 
     def scrape_listing_urls(self) -> list[str]:
         """
-        Paginate through the listing index and collect all detail-page URLs.
+        Paginate through the top-page listing index and collect detail-page URLs.
+        Pagination: /page/2/, /page/3/, …
         Stops at MAX_PAGES or when no more 'next page' link is found.
         """
         urls: list[str] = []
@@ -64,12 +63,10 @@ class KominkaNetScraper(BaseScraper):
                 html = self._fetch_html(next_url)
                 soup = BeautifulSoup(html, "lxml")
 
-                # Extract listing card links
                 page_urls = self._extract_listing_urls(soup)
                 urls.extend(page_urls)
                 logger.info(f"[kominka.net] Page {page_num + 1}: found {len(page_urls)} listings")
 
-                # Find next page link
                 next_url = self._get_next_page_url(soup)
                 page_num += 1
 
@@ -80,34 +77,41 @@ class KominkaNetScraper(BaseScraper):
         return list(dict.fromkeys(urls))  # deduplicate preserving order
 
     def _extract_listing_urls(self, soup: BeautifulSoup) -> list[str]:
-        """Extract detail-page hrefs from a listing index page."""
+        """Extract detail-page hrefs from a listing index page.
+
+        kominka.net detail URL pattern: /bukken/{id}/
+        """
         urls = []
 
-        # kominka.net listing cards link pattern: /item/{id}/
-        for anchor in soup.select("a[href*='/item/']"):
+        for anchor in soup.select("a[href*='/bukken/']"):
             href = anchor.get("href", "")
-            if href:
-                full_url = urljoin(BASE_URL, href)
-                # Clean URL: remove query params from detail pages
-                full_url = full_url.split("?")[0].rstrip("/") + "/"
+            if not href:
+                continue
+            full_url = urljoin(BASE_URL, href)
+            # Normalise: strip query params, ensure trailing slash
+            full_url = full_url.split("?")[0].rstrip("/") + "/"
+            # Skip category/list pages like /category/bukken/
+            if re.search(r"/bukken/[^/]+/$", full_url):
                 urls.append(full_url)
 
         return urls
 
     def _get_next_page_url(self, soup: BeautifulSoup) -> Optional[str]:
-        """Find the 'next page' link in pagination."""
-        # Try common pagination patterns
-        # Pattern 1: rel="next" link
+        """Find the 'next page' link in pagination.
+
+        kominka.net uses WordPress-style pagination: <a href="/page/N/">次のページ »</a>
+        """
+        # Pattern 1: rel="next" link (WordPress standard)
         next_link = soup.find("a", rel="next")
         if next_link and next_link.get("href"):
             return urljoin(BASE_URL, next_link["href"])
 
-        # Pattern 2: pagination list with '次へ' text
+        # Pattern 2: anchor text containing '次'
         for anchor in soup.select("a"):
             text = anchor.get_text(strip=True)
-            if text in ("次へ", "次のページ", "›", ">>"):
-                href = anchor.get("href")
-                if href:
+            if "次" in text and anchor.get("href"):
+                href = anchor["href"]
+                if "/page/" in href:
                     return urljoin(BASE_URL, href)
 
         return None  # no more pages
@@ -121,7 +125,7 @@ class KominkaNetScraper(BaseScraper):
         """
         soup = BeautifulSoup(html, "lxml")
 
-        # Guard: skip if listing is sold / removed
+        # Guard: skip sold/removed listings
         if self._is_sold(soup):
             logger.info(f"[kominka.net] Listing sold/removed: {url}")
             return None
@@ -143,7 +147,7 @@ class KominkaNetScraper(BaseScraper):
         listing["location_city"] = city
         listing["location_address"] = address
 
-        # ── Property details ──────────────────────────────────
+        # ── Property details (area, year built, agency) ──────
         details = self._extract_detail_table(soup)
         listing["area_sqm"] = details.get("building_area")
         listing["land_area_sqm"] = details.get("land_area")
@@ -169,11 +173,27 @@ class KominkaNetScraper(BaseScraper):
         return any(kw in page_text for kw in sold_keywords)
 
     def _extract_title(self, soup: BeautifulSoup) -> Optional[str]:
-        # Try h1 first, then common title selectors
-        for selector in ["h1", ".property-title", ".item-title", ".bukken-title"]:
+        """Extract the listing title.
+
+        kominka.net uses h1.entry-title or the <title> tag minus the site suffix.
+        """
+        # WordPress entry title
+        for selector in ["h1.entry-title", "h1", ".entry-title"]:
             el = soup.select_one(selector)
             if el:
-                return el.get_text(strip=True)
+                text = el.get_text(strip=True)
+                if text and "古民家住まいる" not in text:
+                    return text
+
+        # Fallback: strip site name from <title>
+        title_tag = soup.find("title")
+        if title_tag:
+            title = title_tag.get_text(strip=True)
+            # Remove " – 古民家住まいる" suffix
+            title = re.sub(r"\s*[–\-|｜]\s*古民家住まいる.*$", "", title).strip()
+            if title:
+                return title
+
         return None
 
     def _extract_price(self, soup: BeautifulSoup) -> Optional[int]:
@@ -182,21 +202,8 @@ class KominkaNetScraper(BaseScraper):
             r"([0-9,]+)\s*万円",
             r"([0-9,]+)\s*万",
         ]
-        price_selectors = [
-            ".price", ".item-price", ".bukken-kakaku",
-            "[class*='price']", "[class*='kakaku']"
-        ]
 
-        for selector in price_selectors:
-            el = soup.select_one(selector)
-            if el:
-                text = el.get_text()
-                for pattern in price_patterns:
-                    m = re.search(pattern, text)
-                    if m:
-                        return int(m.group(1).replace(",", ""))
-
-        # Fallback: search entire page text
+        # Search in the full page text (kominka.net embeds price inside entry-content)
         page_text = soup.get_text()
         for pattern in price_patterns:
             m = re.search(pattern, page_text)
@@ -209,37 +216,47 @@ class KominkaNetScraper(BaseScraper):
         return None  # 要相談 or not found
 
     def _extract_location(self, soup: BeautifulSoup) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        """Return (prefecture, city, address) from the listing."""
+        """Return (prefecture, city, address) from the listing.
+
+        kominka.net shows location in:
+        - Breadcrumb: 東北 > 宮城 > 物件情報 > 売買物件
+        - Entry text containing XX県 XX市 etc.
+        """
         prefecture = city = address = None
 
-        # Try structured location fields first
-        for selector in [".location", ".address", ".bukken-address", "[class*='address']"]:
-            el = soup.select_one(selector)
-            if el:
-                full_text = el.get_text(strip=True)
-                prefecture, city, address = self._parse_japanese_address(full_text)
-                if prefecture:
-                    break
+        # 1. Try breadcrumb navigation
+        breadcrumb = soup.select_one(".breadcrumb, nav.breadcrumbs, #breadcrumbs")
+        if breadcrumb:
+            text = breadcrumb.get_text()
+            prefecture, city, address = self._parse_japanese_address(text)
+            if prefecture:
+                return prefecture, city, address
 
-        # Fallback: look for 都道府県 patterns in breadcrumb or meta tags
-        if not prefecture:
-            breadcrumb = soup.select_one("nav[aria-label='breadcrumb'], .breadcrumb, .breadcrumbs")
-            if breadcrumb:
-                text = breadcrumb.get_text()
-                prefecture, city, _ = self._parse_japanese_address(text)
+        # 2. Try WordPress category links (they include prefecture names)
+        for anchor in soup.select("a[href*='/category/bukken/']"):
+            text = anchor.get_text(strip=True)
+            pref, cty, _ = self._parse_japanese_address(text)
+            if pref:
+                prefecture = pref
+                break
+
+        # 3. Search entry content for address-like strings
+        entry = soup.select_one(".entry-content, article, .post-content")
+        if entry:
+            text = entry.get_text()
+            p, c, a = self._parse_japanese_address(text)
+            if p and not prefecture:
+                prefecture, city, address = p, c, a
 
         return prefecture, city, address
 
     def _parse_japanese_address(self, text: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """
         Parse a Japanese address string into (prefecture, city, remainder).
-        Handles: 東京都, 大阪府, 京都府, XX県
         """
-        prefecture = None
-        city = None
+        prefecture = city = None
         address = text.strip()
 
-        # Extract prefecture
         pref_match = re.search(
             r"(北海道|東京都|大阪府|京都府|[^\s]{2,4}[都道府県])", text
         )
@@ -247,7 +264,6 @@ class KominkaNetScraper(BaseScraper):
             prefecture = pref_match.group(1)
             remainder = text[pref_match.end():].strip()
 
-            # Extract city/town (市区町村)
             city_match = re.match(r"([^\s]{2,8}[市区町村郡])", remainder)
             if city_match:
                 city = city_match.group(1)
@@ -259,65 +275,69 @@ class KominkaNetScraper(BaseScraper):
 
     def _extract_detail_table(self, soup: BeautifulSoup) -> dict:
         """
-        Extract structured details from the property info table.
-        Returns a dict with building_area, land_area, year_built, agency etc.
+        Extract structured details from the property info table/body.
+        kominka.net uses WordPress posts; details are in dt/dd or free text.
         """
         details: dict = {}
 
-        # Try definition lists (dt/dd pattern, common in Japanese RE sites)
-        dts = soup.select("dl dt")
-        for dt in dts:
+        # Try definition lists (dt/dd pattern)
+        for dt in soup.select("dl dt"):
             label = dt.get_text(strip=True)
             dd = dt.find_next_sibling("dd")
             if not dd:
                 continue
             value = dd.get_text(strip=True)
+            self._map_detail(details, label, value)
 
-            if any(k in label for k in ["建物面積", "床面積"]):
-                details["building_area"] = self._parse_area(value)
-            elif any(k in label for k in ["土地面積", "敷地面積"]):
-                details["land_area"] = self._parse_area(value)
-            elif any(k in label for k in ["築年", "建築年", "竣工"]):
-                details["year_built"] = self._parse_year(value)
-            elif any(k in label for k in ["業者", "不動産会社", "仲介"]):
-                details["agency_name"] = value
-            elif "電話" in label or "TEL" in label.upper():
-                details["contact_phone"] = self._clean_phone(value)
-            elif "メール" in label or "mail" in label.lower():
-                details["contact_email"] = value.strip()
-
-        # Also try table rows (th/td pattern)
-        trs = soup.select("table tr")
-        for tr in trs:
+        # Try table rows (th/td pattern)
+        for tr in soup.select("table tr"):
             th = tr.select_one("th")
             td = tr.select_one("td")
-            if not th or not td:
-                continue
-            label = th.get_text(strip=True)
-            value = td.get_text(strip=True)
+            if th and td:
+                self._map_detail(details, th.get_text(strip=True), td.get_text(strip=True), setdefault=True)
 
-            if any(k in label for k in ["建物面積", "床面積"]):
-                details.setdefault("building_area", self._parse_area(value))
-            elif any(k in label for k in ["土地面積", "敷地面積"]):
-                details.setdefault("land_area", self._parse_area(value))
-            elif any(k in label for k in ["築年", "建築年"]):
-                details.setdefault("year_built", self._parse_year(value))
-            elif any(k in label for k in ["業者", "不動産"]):
-                details.setdefault("agency_name", value)
-            elif "電話" in label:
-                details.setdefault("contact_phone", self._clean_phone(value))
+        # Fallback: parse raw text from entry body for 建物面積 / 土地 etc.
+        if not details:
+            entry = soup.select_one(".entry-content, article")
+            if entry:
+                text = entry.get_text()
+                for pattern, key, parser in [
+                    (r"建物面積[：:]\s*([\d,.]+[㎡m²坪])", "building_area", self._parse_area),
+                    (r"土地面積[：:]\s*([\d,.]+[㎡m²坪])", "land_area", self._parse_area),
+                    (r"築年[：:]\s*(.{2,20}?年)", "year_built", self._parse_year),
+                ]:
+                    m = re.search(pattern, text)
+                    if m:
+                        details.setdefault(key, parser(m.group(1)))
 
         return details
 
+    def _map_detail(self, details: dict, label: str, value: str, setdefault: bool = False) -> None:
+        """Map a label/value pair into the details dict."""
+        setter = details.setdefault if setdefault else details.__setitem__
+
+        if any(k in label for k in ["建物面積", "床面積"]):
+            setter("building_area", self._parse_area(value))
+        elif any(k in label for k in ["土地面積", "敷地面積"]):
+            setter("land_area", self._parse_area(value))
+        elif any(k in label for k in ["築年", "建築年", "竣工"]):
+            setter("year_built", self._parse_year(value))
+        elif any(k in label for k in ["業者", "不動産", "仲介"]):
+            setter("agency_name", value)
+        elif "電話" in label or "TEL" in label.upper():
+            setter("contact_phone", self._clean_phone(value))
+        elif "メール" in label or "mail" in label.lower():
+            setter("contact_email", value.strip())
+
     def _extract_description(self, soup: BeautifulSoup) -> Optional[str]:
-        """Extract the listing description / PR text."""
-        for selector in [
-            ".description", ".item-description", ".bukken-note",
-            ".pr-text", "[class*='description']", "[class*='comment']",
-            ".property-detail", "article",
-        ]:
+        """Extract the listing description from the WordPress entry content."""
+        # kominka.net uses .entry-content for the post body
+        for selector in [".entry-content", ".post-content", "article .content", "article"]:
             el = soup.select_one(selector)
             if el and len(el.get_text(strip=True)) > 30:
+                # Remove navigation / sidebar noise
+                for noise in el.select("nav, .sidebar, .widget, form, script, style"):
+                    noise.decompose()
                 return el.get_text(separator="\n", strip=True)
 
         # Fallback: largest <p> block
@@ -331,22 +351,21 @@ class KominkaNetScraper(BaseScraper):
         return None
 
     def _extract_images(self, soup: BeautifulSoup) -> list[str]:
-        """Extract all listing image URLs."""
-        seen = set()
-        images = []
+        """Extract listing image URLs."""
+        seen: set[str] = set()
+        images: list[str] = []
 
-        # Target: <img> tags in known photo containers
-        for selector in [".photo", ".gallery", ".images", "[class*='photo']", "[class*='gallery']"]:
-            for img in soup.select(f"{selector} img"):
+        # kominka.net images are in .entry-content or gallery blocks
+        for selector in [".entry-content img", ".gallery img", "article img", "[class*='photo'] img"]:
+            for img in soup.select(selector):
                 src = img.get("src") or img.get("data-src") or img.get("data-lazy-src")
                 if src and src not in seen:
                     full_url = urljoin(BASE_URL, src)
-                    # Skip tiny icons/logos (less than 5KB threshold — check by URL pattern)
-                    if not any(skip in full_url for skip in ["icon", "logo", "btn", "arrow"]):
+                    if not any(skip in full_url for skip in ["icon", "logo", "btn", "arrow", "banner"]):
                         images.append(full_url)
                         seen.add(src)
 
-        # If no gallery found, grab all page images as fallback
+        # Generic fallback
         if not images:
             for img in soup.find_all("img"):
                 src = img.get("src", "")
@@ -355,7 +374,7 @@ class KominkaNetScraper(BaseScraper):
                     images.append(full_url)
                     seen.add(src)
 
-        return images[:20]  # cap at 20 images per listing
+        return images[:20]
 
     # ── Parsing utilities ─────────────────────────────────────
 
@@ -367,7 +386,7 @@ class KominkaNetScraper(BaseScraper):
                 return float(m.group(1).replace(",", ""))
             except ValueError:
                 pass
-        # Try 坪 → ㎡ conversion (1坪 = 3.306㎡)
+        # 坪 → ㎡ (1坪 = 3.306㎡)
         m = re.search(r"([\d.]+)\s*坪", text)
         if m:
             try:
@@ -378,12 +397,10 @@ class KominkaNetScraper(BaseScraper):
 
     def _parse_year(self, text: str) -> Optional[int]:
         """Parse year from Japanese era or Western year strings."""
-        # Western year: 1980年, 2005年
         m = re.search(r"(19\d{2}|20[012]\d)\s*年?", text)
         if m:
             return int(m.group(1))
 
-        # Japanese era → western year
         era_map = {
             "令和": 2018, "平成": 1988, "昭和": 1925,
             "大正": 1911, "明治": 1867,
