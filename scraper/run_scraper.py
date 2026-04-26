@@ -28,6 +28,7 @@ from geocoder import geocode_listing
 from scorer import score_batch
 from scraper_kominka_net import KominkaNetScraper
 from scraper_smout import SmoutScraper
+from scraper_suumo import SuumoScraper
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
 logger.remove()
@@ -100,6 +101,7 @@ def main():
     scrapers_to_run = [
         KominkaNetScraper,   # kominka.net  — 全国古民家専門
         SmoutScraper,        # smout.jp     — 地方移住・古民家・空き家
+        SuumoScraper,        # suumo.jp     — 静岡・千葉・山梨 古民家検索
     ]
 
     total_found = total_new = total_updated = total_errors = 0
