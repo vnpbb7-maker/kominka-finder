@@ -31,13 +31,18 @@ class BaseScraper(ABC):
         self._last_fetch_time: float = 0.0
         self._browser: Optional[Browser] = None
         self._playwright = None
+        self._disallowed_prefixes: list[str] = []
 
         # Load robots.txt once at startup
         robots_url = f"{self.BASE_URL}/robots.txt"
         try:
             self._robot_parser.set_url(robots_url)
             self._robot_parser.read()
+            # Also parse disallowed paths manually as a safety net
+            # (urllib.robotparser can return False for unlisted paths on some servers)
+            self._disallowed_prefixes = self._parse_disallowed(robots_url)
             logger.info(f"[{self.SOURCE_SITE}] Loaded robots.txt from {robots_url}")
+            logger.info(f"[{self.SOURCE_SITE}] Disallowed prefixes: {self._disallowed_prefixes}")
         except Exception as e:
             logger.warning(f"[{self.SOURCE_SITE}] Could not load robots.txt: {e}. Proceeding with caution.")
 
@@ -97,8 +102,41 @@ class BaseScraper(ABC):
         self._last_fetch_time = time.time()
 
     def _is_allowed(self, url: str) -> bool:
-        """Check robots.txt before fetching a URL."""
+        """Check robots.txt before fetching a URL.
+
+        Uses both urllib.robotparser AND our own parsed disallow list,
+        because robotparser can return False for paths not explicitly listed
+        when the robots.txt only has Disallow: /some-path/.
+        """
+        parsed = urlparse(url)
+        path = parsed.path
+
+        # If we have our own disallow list, use it as the source of truth
+        if self._disallowed_prefixes is not None:
+            return not any(path.startswith(prefix) for prefix in self._disallowed_prefixes)
+
+        # Fallback to stdlib parser
         return self._robot_parser.can_fetch("*", url)
+
+    def _parse_disallowed(self, robots_url: str) -> list[str]:
+        """Manually parse Disallow lines from robots.txt for our user-agent."""
+        try:
+            import httpx as _httpx
+            resp = _httpx.get(robots_url, timeout=10, follow_redirects=True)
+            disallowed = []
+            in_our_block = False
+            for line in resp.text.splitlines():
+                line = line.strip()
+                if line.lower().startswith("user-agent:"):
+                    agent = line.split(":", 1)[1].strip()
+                    in_our_block = agent in ("*", "KominkaFinder")
+                elif line.lower().startswith("disallow:") and in_our_block:
+                    path = line.split(":", 1)[1].strip()
+                    if path:  # empty Disallow means allow all
+                        disallowed.append(path)
+            return disallowed
+        except Exception:
+            return []
 
     def _fetch_html(self, url: str, use_playwright: bool = True) -> str:
         """
